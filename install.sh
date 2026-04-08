@@ -49,6 +49,8 @@ AWG_INTERFACE="awg0"
 SERVER_INTERFACE="wg0"
 SERVER_PORT=""
 NO_SERVER=false
+FORCE=false
+VERBOSE=false
 ROUTE_TABLE_NAME="via_tunnel"
 ROUTE_TABLE_ID="200"
 TEMP_CONFIG=""
@@ -69,6 +71,9 @@ usage() {
     echo "  --server-port PORT   VPN server listen port (default: random)"
     echo "  --interface NAME     Tunnel interface name (default: awg0)"
     echo "  --no-server          Skip VPN server setup (tunnel only)"
+    echo "  --verbose            Enable runtime logging to /var/log/amneziawg/"
+    echo "  --force              Force rebuild of amneziawg binaries"
+    echo "  --uninstall          Remove everything and exit"
     echo "  --status             Show diagnostic info and exit"
     echo "  --help               Show this help"
     echo ""
@@ -76,6 +81,7 @@ usage() {
     echo "  sudo $0 client.conf"
     echo "  sudo $0 client.conf --server-port 51820"
     echo "  sudo $0 --status                 # check everything is working"
+    echo "  sudo $0 --uninstall              # remove everything"
     exit 0
 }
 
@@ -98,6 +104,59 @@ while [[ $# -gt 0 ]]; do
         --no-server)
             NO_SERVER=true
             shift
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --force)
+            FORCE=true
+            shift
+            ;;
+        --uninstall)
+            log "Uninstalling AmneziaWG..."
+            echo ""
+
+            # Stop and disable services
+            for _svc in awg-quick@awg0 awg-quick@wg0; do
+                if systemctl is-active "$_svc" &>/dev/null; then
+                    log "Stopping $_svc..."
+                    systemctl stop "$_svc" 2>/dev/null || true
+                fi
+                systemctl disable "$_svc" 2>/dev/null || true
+            done
+
+            # Remove configs
+            if [[ -d /etc/amneziawg ]]; then
+                log "Removing /etc/amneziawg/..."
+                rm -rf /etc/amneziawg
+            fi
+
+            # Remove systemd unit
+            rm -f /etc/systemd/system/awg-quick@.service
+            systemctl daemon-reload
+
+            # Remove binaries
+            rm -f /usr/local/bin/amneziawg-go /usr/local/bin/amneziawg-go-log /usr/local/bin/awg /usr/local/bin/awg-quick
+
+            # Remove runtime logs
+            rm -rf /var/log/amneziawg
+
+            # Remove source dirs
+            rm -rf /opt/amneziawg-go /opt/amneziawg-tools
+
+            # Remove routing table entry
+            if [[ -f /etc/iproute2/rt_tables ]]; then
+                sed -i '/via_tunnel/d' /etc/iproute2/rt_tables
+            fi
+
+            # Clean up ip rules (best effort)
+            ip rule del table via_tunnel 2>/dev/null || true
+
+            log "Uninstall complete"
+            info "ip_forward and /etc/sysctl.conf were left unchanged"
+            info "Go (/usr/local/go) was left in place"
+            exit 0
             ;;
         --status)
             echo ""
@@ -122,12 +181,20 @@ while [[ $# -gt 0 ]]; do
             ip route show table via_tunnel 2>/dev/null | sed 's/^/    /' || echo "    (empty or not found)"
             echo ""
 
-            echo "-- Last 15 log lines (tunnel) --"
-            journalctl -u awg-quick@awg0 --no-pager -n 15 2>/dev/null || echo "  no logs"
+            echo "-- Last 20 log lines: tunnel (awg0) --"
+            if [[ -f /var/log/amneziawg/awg0.log ]]; then
+                tail -20 /var/log/amneziawg/awg0.log
+            else
+                echo "  no log file (not started yet?)"
+            fi
             echo ""
 
-            echo "-- Last 15 log lines (server) --"
-            journalctl -u awg-quick@wg0 --no-pager -n 15 2>/dev/null || echo "  no logs"
+            echo "-- Last 20 log lines: server (wg0) --"
+            if [[ -f /var/log/amneziawg/wg0.log ]]; then
+                tail -20 /var/log/amneziawg/wg0.log
+            else
+                echo "  no log file (not started yet?)"
+            fi
             echo ""
 
             echo "-- Connectivity --"
@@ -140,9 +207,9 @@ while [[ $# -gt 0 ]]; do
             fi
             echo ""
 
-            if [[ -f "${SCRIPT_DIR}/awg-install.log" ]]; then
-                echo "-- Install log: ${SCRIPT_DIR}/awg-install.log --"
-            fi
+            echo "-- Log files --"
+            echo "  Runtime:  /var/log/amneziawg/"
+            [[ -f "${SCRIPT_DIR}/awg-install.log" ]] && echo "  Install:  ${SCRIPT_DIR}/awg-install.log"
             exit 0
             ;;
         --help|-h)
@@ -341,7 +408,8 @@ export PATH="/usr/local/go/bin:$PATH"
 AWG_GO_DIR="/opt/amneziawg-go"
 AWG_TOOLS_DIR="/opt/amneziawg-tools"
 
-if [[ ! -f /usr/local/bin/amneziawg-go ]]; then
+if [[ ! -f /usr/local/bin/amneziawg-go || "$FORCE" == true ]]; then
+    [[ "$FORCE" == true ]] && log "Force rebuilding amneziawg-go..."
     log "Building amneziawg-go..."
 
     if [[ -d "$AWG_GO_DIR" ]]; then
@@ -351,17 +419,19 @@ if [[ ! -f /usr/local/bin/amneziawg-go ]]; then
     fi
 
     cd "$AWG_GO_DIR"
+    [[ "$FORCE" == true ]] && make clean 2>/dev/null || true
     make -j"$(nproc)" 2>&1 | tail -3
     cp amneziawg-go /usr/local/bin/
     chmod +x /usr/local/bin/amneziawg-go
     log "amneziawg-go built and installed"
 else
-    log "amneziawg-go already installed"
+    log "amneziawg-go already installed (use --force to rebuild)"
 fi
 
 # --- Build amneziawg-tools (awg) ---
 
-if [[ ! -f /usr/local/bin/awg ]]; then
+if [[ ! -f /usr/local/bin/awg || "$FORCE" == true ]]; then
+    [[ "$FORCE" == true ]] && log "Force rebuilding amneziawg-tools..."
     log "Building amneziawg-tools..."
 
     if [[ -d "$AWG_TOOLS_DIR" ]]; then
@@ -371,6 +441,7 @@ if [[ ! -f /usr/local/bin/awg ]]; then
     fi
 
     cd "$AWG_TOOLS_DIR/src"
+    [[ "$FORCE" == true ]] && make clean 2>/dev/null || true
     make -j"$(nproc)" 2>&1 | tail -3
     cp wg /usr/local/bin/awg
     chmod +x /usr/local/bin/awg
@@ -383,7 +454,7 @@ if [[ ! -f /usr/local/bin/awg ]]; then
 
     log "awg (amneziawg-tools) built and installed"
 else
-    log "awg already installed"
+    log "awg already installed (use --force to rebuild)"
 fi
 
 # --- Enable IP forwarding ---
@@ -751,11 +822,34 @@ fi
 
 chmod 600 "$AWG_CONF"
 
+# --- Create logging wrapper for amneziawg-go ---
+
+AWG_LOG_DIR="/var/log/amneziawg"
+AWG_GO_IMPL="amneziawg-go"
+
+if [[ "$VERBOSE" == true ]]; then
+    mkdir -p "$AWG_LOG_DIR"
+    log "Verbose mode: runtime logs -> $AWG_LOG_DIR/"
+
+    cat > /usr/local/bin/amneziawg-go-log << LOGEOF
+#!/bin/bash
+IFACE="\${1:-unknown}"
+LOG="${AWG_LOG_DIR}/\${IFACE}.log"
+echo "[\$(date)] amneziawg-go starting: \$IFACE" >> "\$LOG"
+export LOG_LEVEL=verbose
+exec /usr/local/bin/amneziawg-go "\$@" >> "\$LOG" 2>&1
+LOGEOF
+    chmod +x /usr/local/bin/amneziawg-go-log
+    AWG_GO_IMPL="amneziawg-go-log"
+else
+    log "Runtime logging disabled (use --verbose to enable)"
+fi
+
 # --- Create systemd service ---
 
 log "Creating systemd service..."
 
-cat > "/etc/systemd/system/awg-quick@.service" << 'SVCEOF'
+cat > "/etc/systemd/system/awg-quick@.service" << SVCEOF
 [Unit]
 Description=AmneziaWG Tunnel via awg-quick (%i)
 After=network-online.target nss-lookup.target
@@ -764,8 +858,7 @@ Wants=network-online.target nss-lookup.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
-Environment=LOG_LEVEL=verbose
+Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=${AWG_GO_IMPL}
 ExecStart=/usr/local/bin/awg-quick up %i
 ExecStop=/usr/local/bin/awg-quick down %i
 
@@ -777,22 +870,22 @@ SVCEOF
 if [[ ! -f /usr/local/bin/awg-quick ]]; then
     warn "awg-quick not found, creating wrapper..."
 
-    cat > /usr/local/bin/awg-quick << 'WRAPEOF'
+    cat > /usr/local/bin/awg-quick << WRAPEOF
 #!/bin/bash
 # Wrapper: uses standard wg-quick with userspace amneziawg-go
-export WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
+export WG_QUICK_USERSPACE_IMPLEMENTATION=${AWG_GO_IMPL}
 export WG=/usr/local/bin/awg
 
 # wg-quick expects configs in /etc/wireguard or full path
-ACTION="$1"
-IFACE="$2"
+ACTION="\$1"
+IFACE="\$2"
 
-if [[ -f "/etc/amneziawg/${IFACE}.conf" ]]; then
-    exec wg-quick "$ACTION" "/etc/amneziawg/${IFACE}.conf"
-elif [[ -f "$IFACE" ]]; then
-    exec wg-quick "$ACTION" "$IFACE"
+if [[ -f "/etc/amneziawg/\${IFACE}.conf" ]]; then
+    exec wg-quick "\$ACTION" "/etc/amneziawg/\${IFACE}.conf"
+elif [[ -f "\$IFACE" ]]; then
+    exec wg-quick "\$ACTION" "\$IFACE"
 else
-    echo "Config not found for $IFACE"
+    echo "Config not found for \$IFACE"
     exit 1
 fi
 WRAPEOF
@@ -853,9 +946,15 @@ echo -e "${CYAN}Logs & diagnostics:${NC}"
 echo ""
 echo "  sudo $0 --status                           # full diagnostic"
 echo "  cat ${LOG_FILE}                  # install log"
-echo "  journalctl -u awg-quick@${AWG_INTERFACE} -e        # tunnel runtime"
-echo "  journalctl -u awg-quick@${SERVER_INTERFACE} -e         # VPN server runtime"
-echo "  journalctl -f -u awg-quick@${AWG_INTERFACE}        # follow tunnel live"
+if [[ "$VERBOSE" == true ]]; then
+    echo "  tail -f ${AWG_LOG_DIR}/${AWG_INTERFACE}.log        # tunnel runtime (live)"
+    echo "  tail -f ${AWG_LOG_DIR}/${SERVER_INTERFACE}.log         # VPN server runtime (live)"
+    echo ""
+    echo "  # To disable verbose logging, re-run without --verbose"
+else
+    echo ""
+    echo "  # To enable runtime logging, re-run with --verbose"
+fi
 
 if [[ -n "$CLIENT_CONF_FILE" && -f "$CLIENT_CONF_FILE" ]]; then
     echo ""

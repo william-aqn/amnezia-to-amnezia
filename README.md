@@ -157,13 +157,13 @@ This shows interfaces, services, routing rules, recent logs, and tests tunnel co
 Other useful commands:
 
 ```bash
+# Runtime logs (amneziawg-go verbose output per interface)
+tail -f /var/log/amneziawg/awg0.log     # follow tunnel live
+tail -f /var/log/amneziawg/wg0.log      # follow VPN server live
+cat /var/log/amneziawg/awg0.log         # full tunnel log
+
 # Install log (timestamped, saved next to the script)
 cat awg-install.log
-
-# Runtime logs (amneziawg-go runs with LOG_LEVEL=verbose)
-journalctl -u awg-quick@awg0 -e        # tunnel
-journalctl -u awg-quick@wg0 -e         # VPN server
-journalctl -f -u awg-quick@awg0        # follow tunnel live
 ```
 
 ## Troubleshooting
