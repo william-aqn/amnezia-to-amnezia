@@ -575,7 +575,7 @@ elif EXISTING="$(detect_existing_server)"; then
             done
 
             # Read AWG params from server config
-            _get() { grep -iP "^\s*$1\s*=" "$SERVER_CONF" | head -1 | sed 's/.*=\s*//' | tr -d ' '; }
+            _get() { grep -iP "^\s*$1\s*=" "$SERVER_CONF" | head -1 | sed 's/^[^=]*=[[:space:]]*//' | tr -d ' \r'; }
             SRV_PRIVATE="$(_get PrivateKey)"
             SRV_PUBLIC="$(echo "$SRV_PRIVATE" | awg pubkey)"
             SRV_PORT="$(_get ListenPort)"
