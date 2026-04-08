@@ -144,18 +144,42 @@ apt install -y iptables-persistent
 netfilter-persistent save
 ```
 
+## Logs & diagnostics
+
+Run the built-in diagnostic:
+
+```bash
+sudo ./install.sh --status
+```
+
+This shows interfaces, services, routing rules, recent logs, and tests tunnel connectivity in one command.
+
+Other useful commands:
+
+```bash
+# Install log (timestamped, saved next to the script)
+cat awg-install.log
+
+# Runtime logs (amneziawg-go runs with LOG_LEVEL=verbose)
+journalctl -u awg-quick@awg0 -e        # tunnel
+journalctl -u awg-quick@wg0 -e         # VPN server
+journalctl -f -u awg-quick@awg0        # follow tunnel live
+```
+
 ## Troubleshooting
 
 **Tunnel does not come up / no handshake**
+- `sudo ./install.sh --status` -- check if services are active and handshake happened
 - Check endpoint reachability: `ping <server-B-ip>`
 - Check port is open: `nc -zuv <ip> <port>`
 - Check config: `cat /etc/amneziawg/awg0.conf`
-- Check logs: `journalctl -u awg-quick@awg0 -e`
+- Check logs: `journalctl -u awg-quick@awg0 -n 50`
 
 **Clients can't connect to Server A**
 - Check VPN server is running: `awg show wg0`
 - Check firewall allows the server port: `ss -ulnp | grep <port>`
 - Verify client config matches server AWG parameters
+- Check server logs: `journalctl -u awg-quick@wg0 -n 50`
 
 **Client traffic does not go through the tunnel**
 - Check routing: `ip rule show` and `ip route show table via_tunnel`

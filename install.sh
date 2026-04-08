@@ -21,10 +21,19 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log()  { echo -e "${GREEN}[+]${NC} $*"; }
-warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[x]${NC} $*" >&2; }
-info() { echo -e "${CYAN}[i]${NC} $*"; }
+# --- Logging ---
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${SCRIPT_DIR}/awg-install.log"
+
+: > "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+_ts() { date '+%H:%M:%S'; }
+log()  { echo -e "$(_ts) ${GREEN}[+]${NC} $*"; }
+warn() { echo -e "$(_ts) ${YELLOW}[!]${NC} $*"; }
+err()  { echo -e "$(_ts) ${RED}[x]${NC} $*" >&2; }
+info() { echo -e "$(_ts) ${CYAN}[i]${NC} $*"; }
 
 # --- Checks ---
 
@@ -60,12 +69,13 @@ usage() {
     echo "  --server-port PORT   VPN server listen port (default: random)"
     echo "  --interface NAME     Tunnel interface name (default: awg0)"
     echo "  --no-server          Skip VPN server setup (tunnel only)"
+    echo "  --status             Show diagnostic info and exit"
     echo "  --help               Show this help"
     echo ""
     echo "Examples:"
     echo "  sudo $0 client.conf"
     echo "  sudo $0 client.conf --server-port 51820"
-    echo "  sudo $0                          # paste config interactively"
+    echo "  sudo $0 --status                 # check everything is working"
     exit 0
 }
 
@@ -88,6 +98,52 @@ while [[ $# -gt 0 ]]; do
         --no-server)
             NO_SERVER=true
             shift
+            ;;
+        --status)
+            echo ""
+            echo "=== AmneziaWG Diagnostics ==="
+            echo ""
+
+            echo "-- Interfaces --"
+            awg show 2>/dev/null || echo "  awg not installed or no interfaces up"
+            echo ""
+
+            echo "-- Services --"
+            for _svc in awg-quick@wg0 awg-quick@awg0; do
+                _state="$(systemctl is-active "$_svc" 2>/dev/null || true)"
+                printf "  %-28s %s\n" "$_svc" "$_state"
+            done
+            echo ""
+
+            echo "-- Routing --"
+            echo "  ip rules:"
+            ip rule show 2>/dev/null | grep -E '(via_tunnel|from)' | sed 's/^/    /'
+            echo "  table via_tunnel:"
+            ip route show table via_tunnel 2>/dev/null | sed 's/^/    /' || echo "    (empty or not found)"
+            echo ""
+
+            echo "-- Last 15 log lines (tunnel) --"
+            journalctl -u awg-quick@awg0 --no-pager -n 15 2>/dev/null || echo "  no logs"
+            echo ""
+
+            echo "-- Last 15 log lines (server) --"
+            journalctl -u awg-quick@wg0 --no-pager -n 15 2>/dev/null || echo "  no logs"
+            echo ""
+
+            echo "-- Connectivity --"
+            _tunnel_ip="$(ip -4 -o addr show dev awg0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
+            if [[ -n "$_tunnel_ip" ]]; then
+                echo -n "  Exit IP (via tunnel): "
+                curl -s4 --max-time 5 --interface "$_tunnel_ip" ifconfig.me 2>/dev/null || echo "FAILED"
+            else
+                echo "  Tunnel interface awg0 not up"
+            fi
+            echo ""
+
+            if [[ -f "${SCRIPT_DIR}/awg-install.log" ]]; then
+                echo "-- Install log: ${SCRIPT_DIR}/awg-install.log --"
+            fi
+            exit 0
             ;;
         --help|-h)
             usage
@@ -120,7 +176,7 @@ if [[ -z "$CONFIG_FILE" ]]; then
     info "No config file specified."
     info "Paste your AmneziaWG config below, then press Ctrl+D on an empty line:"
     echo ""
-    TEMP_CONFIG="$(pwd)/awg-client-$$.conf"
+    TEMP_CONFIG="${SCRIPT_DIR}/awg-client-$$.conf"
     cat > "$TEMP_CONFIG"
     echo ""
     if [[ ! -s "$TEMP_CONFIG" ]]; then
@@ -263,7 +319,7 @@ if [[ "$GO_MAJOR" -lt 1 ]] || [[ "$GO_MAJOR" -eq 1 && "$GO_MINOR" -lt 21 ]]; the
     warn "Go $GO_VERSION is too old, installing a newer version..."
 
     GO_TAR="go1.22.5.linux-amd64.tar.gz"
-    GO_TAR_PATH="$(pwd)/$GO_TAR"
+    GO_TAR_PATH="${SCRIPT_DIR}/$GO_TAR"
     if [[ ! -f "$GO_TAR_PATH" ]]; then
         wget -q "https://go.dev/dl/$GO_TAR" -O "$GO_TAR_PATH" 2>/dev/null || {
             err "Failed to download Go. Install manually: https://go.dev/dl/"
@@ -709,6 +765,7 @@ Wants=network-online.target nss-lookup.target
 Type=oneshot
 RemainAfterExit=yes
 Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go
+Environment=LOG_LEVEL=verbose
 ExecStart=/usr/local/bin/awg-quick up %i
 ExecStop=/usr/local/bin/awg-quick down %i
 
@@ -784,16 +841,21 @@ info "Route table: $ROUTE_TABLE_NAME (#$ROUTE_TABLE_ID)"
 echo ""
 echo -e "${CYAN}Management:${NC}"
 echo ""
-if [[ "$SERVER_CREATED" == true ]]; then
-    echo "  awg show                                  # all interfaces"
-fi
+echo "  awg show                                  # all interfaces"
 echo "  systemctl status  awg-quick@${AWG_INTERFACE}       # tunnel status"
 echo "  systemctl restart awg-quick@${AWG_INTERFACE}       # restart tunnel"
-echo "  journalctl -u awg-quick@${AWG_INTERFACE} -e        # tunnel logs"
-
 echo ""
 echo "  # Verify (should show server B IP):"
 echo "  curl --interface ${IFACE_ADDRESS%/*} -4 ifconfig.me"
+
+echo ""
+echo -e "${CYAN}Logs & diagnostics:${NC}"
+echo ""
+echo "  sudo $0 --status                           # full diagnostic"
+echo "  cat ${LOG_FILE}                  # install log"
+echo "  journalctl -u awg-quick@${AWG_INTERFACE} -e        # tunnel runtime"
+echo "  journalctl -u awg-quick@${SERVER_INTERFACE} -e         # VPN server runtime"
+echo "  journalctl -f -u awg-quick@${AWG_INTERFACE}        # follow tunnel live"
 
 if [[ -n "$CLIENT_CONF_FILE" && -f "$CLIENT_CONF_FILE" ]]; then
     echo ""
