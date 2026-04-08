@@ -708,10 +708,10 @@ H2 = ${AWG_H2}
 H3 = ${AWG_H3}
 H4 = ${AWG_H4}
 
-PostUp = iptables -A FORWARD -i %i -j ACCEPT
-PostUp = iptables -A FORWARD -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT
 PostDown = iptables -D FORWARD -i %i -j ACCEPT
-PostDown = iptables -D FORWARD -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -D FORWARD -o %i -j ACCEPT
 
 [Peer]
 PublicKey = ${CLI_PUBLIC}
@@ -745,6 +745,12 @@ Endpoint = ${PUBLIC_IP}:${SERVER_PORT}
 PersistentKeepalive = 25
 CLIFEOF
     chmod 600 "$CLIENT_CONF_FILE"
+
+    # Open firewall port
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "active"; then
+        log "Opening UFW port ${SERVER_PORT}/udp..."
+        ufw allow "${SERVER_PORT}/udp" >/dev/null 2>&1
+    fi
 
     SERVER_CREATED=true
     log "VPN server config: $SERVER_CONF"
@@ -800,6 +806,16 @@ PostUp = ip route add default dev %i table ${ROUTE_TABLE_NAME}
 # VPN client traffic -> through tunnel
 PostUp = ip rule add from ${VPN_SUBNET} table ${ROUTE_TABLE_NAME} priority 10
 
+# Allow forwarding through tunnel
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT
+
+# NAT: rewrite client src IP to tunnel IP so Server B accepts it
+PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE
+
+PostDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -o %i -j ACCEPT 2>/dev/null || true
 PostDown = ip rule del from ${VPN_SUBNET} table ${ROUTE_TABLE_NAME} priority 10 2>/dev/null || true
 PostDown = ip route del default dev %i table ${ROUTE_TABLE_NAME} 2>/dev/null || true
 PostDown = ip route del ${ENDPOINT_HOST}/32 via ${DEFAULT_GW} dev ${DEFAULT_IFACE} 2>/dev/null || true

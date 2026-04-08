@@ -5,8 +5,11 @@ One-script setup: installs an AmneziaWG VPN server on Server A, builds a tunnel 
 ```
                          AmneziaWG tunnel
   Clients --> [ Server A (Amnezia VPN) ] ===========> [ Server B ] --> Internet
-                  |                                        |
-                  +-- SSH / direct access                  +-- NAT (masquerade)
+                  |           |                            |
+                  |           +-- MASQUERADE on awg0       +-- NAT (masquerade)
+                  |           +-- source-based routing
+                  |
+                  +-- SSH / direct access
                       via default gateway
 ```
 
@@ -36,8 +39,9 @@ wget -qO awg-install.sh https://raw.githubusercontent.com/william-aqn/amnezia-to
 
 The script will:
 - Build AmneziaWG from source
-- Set up a VPN server on Server A (generate keys, AWG obfuscation params, client config)
-- Create a tunnel from Server A to Server B
+- Set up a VPN server on Server A (generate keys, AWG obfuscation params, open firewall port)
+- Create a tunnel from Server A to Server B with NAT
+- Configure source-based routing (only VPN client traffic goes through the tunnel)
 - Start both services and enable them on boot
 - Print a ready-to-use client config for the Amnezia app
 
@@ -62,8 +66,11 @@ sudo ./install.sh [config-file] [options]
 | `--vpn-subnet CIDR` | `10.8.1.0/24` | VPN client subnet |
 | `--server-port PORT` | random | VPN server listen port |
 | `--interface NAME` | `awg0` | Tunnel interface name |
+| `--verbose` | | Enable runtime logging to /var/log/amneziawg/ |
 | `--no-server` | | Skip VPN server setup (tunnel only) |
-| `--help` | | Show help |
+| `--force` | | Force rebuild of amneziawg binaries |
+| `--status` | | Show diagnostic info and exit |
+| `--uninstall` | | Remove everything and exit |
 
 If `config-file` is omitted, you will be prompted to paste it.
 
@@ -75,12 +82,30 @@ If `config-file` is omitted, you will be prompted to paste it.
 4. Enables `net.ipv4.ip_forward`
 5. **Sets up VPN server** on Server A:
    - Generates server/client key pairs and AWG obfuscation parameters
-   - Creates server config with FORWARD rules
+   - Creates server config with FORWARD rules (`iptables -I`)
+   - Opens firewall port (UFW auto-detected)
    - Generates a client config for the Amnezia app
 6. **Sets up tunnel** from Server A to Server B:
+   - `Table = off` -- prevents awg-quick from overriding system routing
    - Source-based routing: only VPN client traffic goes through the tunnel
+   - `MASQUERADE` on awg0 -- rewrites client src IP to tunnel IP for Server B
+   - FORWARD rules inserted before UFW (`iptables -I FORWARD 1`)
    - Creates routing table `via_tunnel` (#200)
 7. Creates systemd services and starts everything
+
+## How traffic flows
+
+```
+1. Client (10.8.1.2) connects to Server A wg0
+2. ip rule: from 10.8.1.0/24 -> table via_tunnel
+3. table via_tunnel: default dev awg0
+4. MASQUERADE on awg0: src 10.8.1.2 -> tunnel IP (e.g. 10.8.1.5)
+5. Packet goes through AWG tunnel to Server B
+6. Server B does NAT and forwards to internet
+7. Reply comes back the same path
+```
+
+SSH and direct connections use the main routing table -- unaffected.
 
 ## Re-running the script / adding clients
 
@@ -99,8 +124,9 @@ Show existing or create new? [1]:
 ```
 
   - Pick a number to display that client's config (for import into the Amnezia app)
-  - Enter `n` to generate a new client (new keys, new IP, peer added to server automatically)
+  - Enter `n` to generate a new client (new keys, new IP, peer added to server, service restarted)
 - **Tunnel config** is always regenerated from the provided config file
+- Use `--force` to rebuild amneziawg binaries from latest source
 
 ## Tunnel management
 
@@ -108,17 +134,11 @@ Show existing or create new? [1]:
 # Status of all interfaces
 awg show
 
-# Restart tunnel
+# Restart tunnel / server
 sudo systemctl restart awg-quick@awg0
-
-# Restart VPN server
 sudo systemctl restart awg-quick@wg0
 
-# Logs
-journalctl -u awg-quick@awg0 -e    # tunnel
-journalctl -u awg-quick@wg0 -e     # VPN server
-
-# Verify (should show server B IP)
+# Verify exit IP (should show server B IP)
 curl --interface <tunnel-ip> -4 ifconfig.me
 ```
 
@@ -152,45 +172,52 @@ Run the built-in diagnostic:
 sudo ./install.sh --status
 ```
 
-This shows interfaces, services, routing rules, recent logs, and tests tunnel connectivity in one command.
-
-Other useful commands:
+Shows interfaces, services, routing rules, recent logs, and tests tunnel connectivity.
 
 ```bash
-# Runtime logs (amneziawg-go verbose output per interface)
-tail -f /var/log/amneziawg/awg0.log     # follow tunnel live
-tail -f /var/log/amneziawg/wg0.log      # follow VPN server live
-cat /var/log/amneziawg/awg0.log         # full tunnel log
+# Enable verbose runtime logging
+sudo ./install.sh client.conf --verbose
 
-# Install log (timestamped, saved next to the script)
+# View runtime logs (only with --verbose)
+tail -f /var/log/amneziawg/awg0.log     # tunnel live
+tail -f /var/log/amneziawg/wg0.log      # VPN server live
+
+# Install log (always saved next to the script)
 cat awg-install.log
+
+# Disable verbose logging (re-run without --verbose)
+sudo ./install.sh client.conf
 ```
 
 ## Troubleshooting
 
 **Tunnel does not come up / no handshake**
-- `sudo ./install.sh --status` -- check if services are active and handshake happened
-- Check endpoint reachability: `ping <server-B-ip>`
-- Check port is open: `nc -zuv <ip> <port>`
-- Check config: `cat /etc/amneziawg/awg0.conf`
-- Check logs: `journalctl -u awg-quick@awg0 -n 50`
+- `sudo ./install.sh --status` -- check services and handshake
+- Check endpoint: `ping <server-B-ip>`
+- Check port: `nc -zuv <ip> <port>`
+- Check config: `cat /etc/amnezia/amneziawg/awg0.conf`
 
 **Clients can't connect to Server A**
-- Check VPN server is running: `awg show wg0`
-- Check firewall allows the server port: `ss -ulnp | grep <port>`
-- Verify client config matches server AWG parameters
-- Check server logs: `journalctl -u awg-quick@wg0 -n 50`
+- Check server: `awg show wg0`
+- Check firewall: `ss -ulnp | grep <port>` and `ufw status`
+- If UFW is active, ensure the port is open: `ufw allow <port>/udp`
 
-**Client traffic does not go through the tunnel**
+**Client connected but no traffic**
+- Check tunnel handshake: `awg show awg0` (latest handshake should be recent)
 - Check routing: `ip rule show` and `ip route show table via_tunnel`
-- Check NAT on server B
-- Verify VPN subnet matches: `awg show wg0` should show client IPs in the expected range
+- Check FORWARD rules: `iptables -L FORWARD -n -v | head -10` (wg0/awg0 ACCEPT should be at the top, before UFW)
+- Check NAT: `iptables -t nat -L POSTROUTING -n` (should have MASQUERADE on awg0)
+- Check NAT on Server B
 
-**SSH drops after starting**
-- Should not happen (source-based routing only affects VPN client traffic)
-- Check that VPN subnet doesn't overlap with your SSH connection
-- Check rules: `ip rule show`
+**SSH drops after starting tunnel**
+- Ensure tunnel config has `Table = off`
+- Check: `grep Table /etc/amnezia/amneziawg/awg0.conf`
+
+**Reinstall / update**
+- Re-run the script -- it's safe, server config is preserved
+- `--force` to rebuild binaries from latest source
+- `--uninstall` to remove everything
 
 **Build fails**
-- Ensure git, make, gcc are installed: `apt install -y git make gcc`
-- Check Go version: `go version` (need >= 1.21)
+- Ensure git, make, gcc: `apt install -y git make gcc`
+- Check Go: `go version` (need >= 1.21)
