@@ -127,9 +127,9 @@ while [[ $# -gt 0 ]]; do
             done
 
             # Remove configs
-            if [[ -d /etc/amneziawg ]]; then
-                log "Removing /etc/amneziawg/..."
-                rm -rf /etc/amneziawg
+            if [[ -d /etc/amnezia/amneziawg ]]; then
+                log "Removing /etc/amnezia/amneziawg/..."
+                rm -rf /etc/amnezia/amneziawg
             fi
 
             # Remove systemd unit
@@ -467,7 +467,7 @@ fi
 
 # --- VPN Server Setup ---
 
-AWG_CONF_DIR="/etc/amneziawg"
+AWG_CONF_DIR="/etc/amnezia/amneziawg"
 mkdir -p "$AWG_CONF_DIR"
 
 SERVER_CONF="$AWG_CONF_DIR/${SERVER_INTERFACE}.conf"
@@ -496,7 +496,7 @@ detect_existing_server() {
         /etc/amnezia/amneziawg/*.conf \
         /var/lib/docker/volumes/amnezia-*/_data/*.conf \
         /etc/wireguard/wg*.conf \
-        /etc/amneziawg/*.conf; do
+        /etc/amnezia/amneziawg/*.conf; do
         [[ -f "$conf_file" ]] || continue
         # Skip our tunnel config
         [[ "$conf_file" == *"/${AWG_INTERFACE}.conf" ]] && continue
@@ -772,6 +772,7 @@ cat > "$AWG_CONF" << AWGEOF
 [Interface]
 Address = ${IFACE_ADDRESS}
 PrivateKey = ${IFACE_PRIVATE_KEY}
+Table = off
 AWGEOF
 
 # Add AmneziaWG parameters (non-empty only)
@@ -880,8 +881,8 @@ export WG=/usr/local/bin/awg
 ACTION="\$1"
 IFACE="\$2"
 
-if [[ -f "/etc/amneziawg/\${IFACE}.conf" ]]; then
-    exec wg-quick "\$ACTION" "/etc/amneziawg/\${IFACE}.conf"
+if [[ -f "/etc/amnezia/amneziawg/\${IFACE}.conf" ]]; then
+    exec wg-quick "\$ACTION" "/etc/amnezia/amneziawg/\${IFACE}.conf"
 elif [[ -f "\$IFACE" ]]; then
     exec wg-quick "\$ACTION" "\$IFACE"
 else
