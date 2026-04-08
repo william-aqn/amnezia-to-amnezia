@@ -373,7 +373,7 @@ info "Default GW:  $DEFAULT_GW via $DEFAULT_IFACE"
 log "Installing dependencies..."
 
 apt-get update -qq
-apt-get install -y -qq git make gcc golang >/dev/null 2>&1 || {
+apt-get install -y -qq git make gcc golang qrencode >/dev/null 2>&1 || {
     warn "golang from repo might be outdated, checking version..."
 }
 
@@ -981,11 +981,19 @@ if [[ -n "$CLIENT_CONF_FILE" && -f "$CLIENT_CONF_FILE" ]]; then
     echo ""
     cat "$CLIENT_CONF_FILE"
     echo ""
+    if command -v qrencode &>/dev/null; then
+        echo "============================================================================"
+        echo ""
+        info "QR code (for standard WireGuard apps):"
+        echo ""
+        qrencode -t ansiutf8 < "$CLIENT_CONF_FILE"
+        echo ""
+    fi
     echo "============================================================================"
     echo ""
-    info "Import this config into the Amnezia app to connect."
-    info "Or scan the QR code (if qrencode is installed):"
-    echo "  qrencode -t ansiutf8 < $CLIENT_CONF_FILE"
+    warn "Amnezia app does NOT support QR/text import for AmneziaWG configs."
+    info "To import: save the config above to a .conf file on your device,"
+    info "then use 'Import' -> 'File' in the Amnezia app."
 fi
 
 echo ""
