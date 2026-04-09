@@ -4,7 +4,7 @@ One-script setup: installs an AmneziaWG VPN server on Server A, builds a tunnel 
 
 ```
                          AmneziaWG tunnel
-  Clients --> [ Server A (Amnezia VPN) ] ===========> [ Server B ] --> Internet
+  Clients --> [ Server A (Amnezia VPN) ] ===========> [ Server B (Amnezia VPN) ] --> Internet
                   |           |                            |
                   |           +-- MASQUERADE on awg0       +-- NAT (masquerade)
                   |           +-- source-based routing
