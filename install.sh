@@ -8,6 +8,10 @@ set -euo pipefail
 # All VPN client traffic is routed through the tunnel (source-based routing).
 # SSH and direct connections remain unaffected.
 #
+# With --client-only this machine becomes a plain AmneziaWG client instead:
+# no VPN server, no chain -- all of this box's own traffic goes through the
+# tunnel to Server B (full tunnel). SSH access is preserved automatically.
+#
 # Usage:
 #   sudo ./install.sh [config-file] [options]
 #
@@ -49,6 +53,7 @@ AWG_INTERFACE="awg0"
 SERVER_INTERFACE="wg0"
 SERVER_PORT=""
 NO_SERVER=false
+CLIENT_ONLY=false
 FORCE=false
 VERBOSE=false
 ROUTE_TABLE_NAME="via_tunnel"
@@ -67,6 +72,10 @@ usage() {
     echo "If config-file is omitted, you will be prompted to paste it."
     echo ""
     echo "Options:"
+    echo "  --client-only        This box becomes a plain AWG client: no VPN"
+    echo "                       server, no chain -- all of its own traffic goes"
+    echo "                       through the tunnel to Server B (full tunnel)."
+    echo "                       SSH access is preserved automatically."
     echo "  --vpn-subnet CIDR    VPN client subnet (default: 10.8.1.0/24)"
     echo "  --server-port PORT   VPN server listen port (default: random)"
     echo "  --interface NAME     Tunnel interface name (default: awg0)"
@@ -79,6 +88,7 @@ usage() {
     echo ""
     echo "Examples:"
     echo "  sudo $0 client.conf"
+    echo "  sudo $0 client.conf --client-only   # route THIS box through Server B"
     echo "  sudo $0 client.conf --server-port 51820"
     echo "  sudo $0 --status                 # check everything is working"
     echo "  sudo $0 --uninstall              # remove everything"
@@ -102,6 +112,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --no-server)
+            NO_SERVER=true
+            shift
+            ;;
+        --client-only|--client)
+            CLIENT_ONLY=true
             NO_SERVER=true
             shift
             ;;
@@ -368,6 +383,18 @@ fi
 
 info "Default GW:  $DEFAULT_GW via $DEFAULT_IFACE"
 
+# Local IP on the default interface + the IP we are SSH'd in from.
+# Used by --client-only to keep inbound connections (SSH) alive when the
+# whole box is routed through the tunnel.
+LOCAL_IP="$(ip -4 -o addr show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+SSH_CLIENT_IP="$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')"
+
+# Does this host have a global IPv6 address? (decides ::/0 full tunnel)
+HAS_IPV6=false
+if ip -6 addr show scope global 2>/dev/null | grep -q 'inet6'; then
+    HAS_IPV6=true
+fi
+
 # --- Install dependencies ---
 
 log "Installing dependencies..."
@@ -458,11 +485,17 @@ else
 fi
 
 # --- Enable IP forwarding ---
+# Only needed when this box forwards traffic for others (VPN server / chain).
+# A plain client (--client-only) routes only its own traffic, so skip it.
 
-log "Enabling ip_forward..."
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-if ! grep -q '^net.ipv4.ip_forward\s*=\s*1' /etc/sysctl.conf 2>/dev/null; then
-    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+if [[ "$CLIENT_ONLY" == true ]]; then
+    log "Client-only mode: skipping ip_forward (not forwarding for others)"
+else
+    log "Enabling ip_forward..."
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    if ! grep -q '^net.ipv4.ip_forward\s*=\s*1' /etc/sysctl.conf 2>/dev/null; then
+        echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+    fi
 fi
 
 # --- VPN Server Setup ---
@@ -757,15 +790,19 @@ CLIFEOF
     log "Client config:     $CLIENT_CONF_FILE"
 fi
 
-info "VPN subnet:  $VPN_SUBNET"
+if [[ "$CLIENT_ONLY" != true ]]; then
+    info "VPN subnet:  $VPN_SUBNET"
+fi
 
-# --- Create routing table ---
+# --- Create routing table (source-based routing -- chain mode only) ---
 
-if ! grep -q "$ROUTE_TABLE_NAME" /etc/iproute2/rt_tables 2>/dev/null; then
-    echo "$ROUTE_TABLE_ID $ROUTE_TABLE_NAME" >> /etc/iproute2/rt_tables
-    log "Routing table '$ROUTE_TABLE_NAME' (#$ROUTE_TABLE_ID) created"
-else
-    log "Routing table '$ROUTE_TABLE_NAME' already exists"
+if [[ "$CLIENT_ONLY" != true ]]; then
+    if ! grep -q "$ROUTE_TABLE_NAME" /etc/iproute2/rt_tables 2>/dev/null; then
+        echo "$ROUTE_TABLE_ID $ROUTE_TABLE_NAME" >> /etc/iproute2/rt_tables
+        log "Routing table '$ROUTE_TABLE_NAME' (#$ROUTE_TABLE_ID) created"
+    else
+        log "Routing table '$ROUTE_TABLE_NAME' already exists"
+    fi
 fi
 
 # --- Generate tunnel config (Server A -> Server B) ---
@@ -774,12 +811,27 @@ AWG_CONF="$AWG_CONF_DIR/${AWG_INTERFACE}.conf"
 
 log "Generating tunnel config: $AWG_CONF"
 
-cat > "$AWG_CONF" << AWGEOF
-[Interface]
-Address = ${IFACE_ADDRESS}
-PrivateKey = ${IFACE_PRIVATE_KEY}
-Table = off
-AWGEOF
+# [Interface] header.
+#   chain mode:        Table = off  -- we do source-based routing ourselves
+#   client-only mode:  no Table     -- awg-quick auto-creates the full-tunnel
+#                                       default route (AllowedIPs = 0.0.0.0/0)
+{
+    echo "[Interface]"
+    echo "Address = ${IFACE_ADDRESS}"
+    echo "PrivateKey = ${IFACE_PRIVATE_KEY}"
+    if [[ "$CLIENT_ONLY" != true ]]; then
+        echo "Table = off"
+    fi
+} > "$AWG_CONF"
+
+# DNS through the tunnel (client-only, avoids DNS leaks). awg-quick applies the
+# DNS = directive via the `resolvconf` command; if it's missing we manage
+# /etc/resolv.conf ourselves in PostUp/PostDown below.
+DNS_VIA_DIRECTIVE=false
+if [[ "$CLIENT_ONLY" == true && -n "$IFACE_DNS" ]] && command -v resolvconf &>/dev/null; then
+    echo "DNS = ${IFACE_DNS}" >> "$AWG_CONF"
+    DNS_VIA_DIRECTIVE=true
+fi
 
 # Add AmneziaWG parameters (non-empty only)
 for param in Jc:IFACE_JC Jmin:IFACE_JMIN Jmax:IFACE_JMAX \
@@ -795,7 +847,41 @@ for param in Jc:IFACE_JC Jmin:IFACE_JMIN Jmax:IFACE_JMAX \
 done
 
 # --- Routing rules (PostUp / PostDown) ---
-cat >> "$AWG_CONF" << AWGEOF
+if [[ "$CLIENT_ONLY" == true ]]; then
+    # Client-only: awg-quick installs the full-tunnel default route and endpoint
+    # protection itself (because AllowedIPs = 0.0.0.0/0). All we add are rules to
+    # keep inbound connections (SSH) on the real link so we don't lock ourselves
+    # out: reply traffic from our public IP -- and to the admin's IP -- stays on
+    # the main routing table instead of being pushed into the tunnel.
+    {
+        echo ""
+        echo "# Keep inbound connections (SSH, etc.) reachable -- do not lock ourselves out"
+    } >> "$AWG_CONF"
+    if [[ -n "$SSH_CLIENT_IP" ]]; then
+        echo "PostUp = ip rule add to ${SSH_CLIENT_IP} table main priority 90" >> "$AWG_CONF"
+        echo "PostDown = ip rule del to ${SSH_CLIENT_IP} table main priority 90 2>/dev/null || true" >> "$AWG_CONF"
+    fi
+    if [[ -n "$LOCAL_IP" ]]; then
+        echo "PostUp = ip rule add from ${LOCAL_IP} table main priority 100" >> "$AWG_CONF"
+        echo "PostDown = ip rule del from ${LOCAL_IP} table main priority 100 2>/dev/null || true" >> "$AWG_CONF"
+    fi
+
+    # If resolvconf isn't available, point /etc/resolv.conf at the tunnel DNS
+    # directly (backup on up, restore on down). Every step is guarded so it can
+    # never block tunnel bring-up.
+    if [[ -n "$IFACE_DNS" && "$DNS_VIA_DIRECTIVE" != true ]]; then
+        DNS_WRITE=""
+        for _d in $(echo "$IFACE_DNS" | tr ',' ' '); do
+            DNS_WRITE+="echo nameserver $_d; "
+        done
+        {
+            echo "PostUp = cp -fL /etc/resolv.conf /etc/resolv.conf.awg.bak 2>/dev/null || true"
+            echo "PostUp = rm -f /etc/resolv.conf; { ${DNS_WRITE}} > /etc/resolv.conf 2>/dev/null || true"
+            echo "PostDown = if [ -f /etc/resolv.conf.awg.bak ]; then rm -f /etc/resolv.conf; cp -fa /etc/resolv.conf.awg.bak /etc/resolv.conf; rm -f /etc/resolv.conf.awg.bak; fi"
+        } >> "$AWG_CONF"
+    fi
+else
+    cat >> "$AWG_CONF" << AWGEOF
 
 # Route to endpoint via real gateway (prevent tunnel loop)
 PostUp = ip route add ${ENDPOINT_HOST}/32 via ${DEFAULT_GW} dev ${DEFAULT_IFACE} 2>/dev/null || true
@@ -819,22 +905,38 @@ PostDown = iptables -D FORWARD -o %i -j ACCEPT 2>/dev/null || true
 PostDown = ip rule del from ${VPN_SUBNET} table ${ROUTE_TABLE_NAME} priority 10 2>/dev/null || true
 PostDown = ip route del default dev %i table ${ROUTE_TABLE_NAME} 2>/dev/null || true
 PostDown = ip route del ${ENDPOINT_HOST}/32 via ${DEFAULT_GW} dev ${DEFAULT_IFACE} 2>/dev/null || true
-
-[Peer]
-PublicKey = ${PEER_PUBLIC_KEY}
 AWGEOF
+fi
+
+# --- [Peer] ---
+{
+    echo ""
+    echo "[Peer]"
+    echo "PublicKey = ${PEER_PUBLIC_KEY}"
+} >> "$AWG_CONF"
 
 if [[ -n "$PEER_PRESHARED_KEY" ]]; then
     echo "PresharedKey = ${PEER_PRESHARED_KEY}" >> "$AWG_CONF"
 fi
 
-cat >> "$AWG_CONF" << AWGEOF
-AllowedIPs = ${PEER_ALLOWED_IPS}
-Endpoint = ${PEER_ENDPOINT}
-AWGEOF
+# AllowedIPs: full tunnel in client-only mode (route everything through Server B)
+if [[ "$CLIENT_ONLY" == true ]]; then
+    if [[ "$HAS_IPV6" == true ]]; then
+        echo "AllowedIPs = 0.0.0.0/0, ::/0" >> "$AWG_CONF"
+    else
+        echo "AllowedIPs = 0.0.0.0/0" >> "$AWG_CONF"
+    fi
+else
+    echo "AllowedIPs = ${PEER_ALLOWED_IPS}" >> "$AWG_CONF"
+fi
+
+echo "Endpoint = ${PEER_ENDPOINT}" >> "$AWG_CONF"
 
 if [[ -n "$PEER_KEEPALIVE" ]]; then
     echo "PersistentKeepalive = ${PEER_KEEPALIVE}" >> "$AWG_CONF"
+elif [[ "$CLIENT_ONLY" == true ]]; then
+    # Keep the tunnel alive through NAT so the box stays connected
+    echo "PersistentKeepalive = 25" >> "$AWG_CONF"
 fi
 
 chmod 600 "$AWG_CONF"
@@ -942,11 +1044,19 @@ if [[ "$SERVER_CREATED" == true ]]; then
 fi
 
 echo ""
-echo -e "${CYAN}Tunnel to Server B:${NC}"
+if [[ "$CLIENT_ONLY" == true ]]; then
+    echo -e "${CYAN}Tunnel (this box -> Server B):${NC}"
+else
+    echo -e "${CYAN}Tunnel to Server B:${NC}"
+fi
 info "Config:     $AWG_CONF"
 info "Interface:  $AWG_INTERFACE"
 info "Endpoint:   $ENDPOINT_HOST:$ENDPOINT_PORT"
-info "Route table: $ROUTE_TABLE_NAME (#$ROUTE_TABLE_ID)"
+if [[ "$CLIENT_ONLY" == true ]]; then
+    info "Mode:       client-only (full tunnel -- all of this box's traffic)"
+else
+    info "Route table: $ROUTE_TABLE_NAME (#$ROUTE_TABLE_ID)"
+fi
 
 echo ""
 echo -e "${CYAN}Management:${NC}"
@@ -955,8 +1065,13 @@ echo "  awg show                                  # all interfaces"
 echo "  systemctl status  awg-quick@${AWG_INTERFACE}       # tunnel status"
 echo "  systemctl restart awg-quick@${AWG_INTERFACE}       # restart tunnel"
 echo ""
-echo "  # Verify (should show server B IP):"
-echo "  curl --interface ${IFACE_ADDRESS%/*} -4 ifconfig.me"
+if [[ "$CLIENT_ONLY" == true ]]; then
+    echo "  # Verify (should show Server B's IP):"
+    echo "  curl -4 ifconfig.me"
+else
+    echo "  # Verify (should show server B IP):"
+    echo "  curl --interface ${IFACE_ADDRESS%/*} -4 ifconfig.me"
+fi
 
 echo ""
 echo -e "${CYAN}Logs & diagnostics:${NC}"
@@ -998,6 +1113,14 @@ fi
 
 echo ""
 echo -e "${YELLOW}Notes:${NC}"
-echo "  - SSH and direct connections to this server are NOT affected"
-echo "  - All VPN client traffic (${VPN_SUBNET}) goes through Server B"
+if [[ "$CLIENT_ONLY" == true ]]; then
+    echo "  - ALL of this box's outbound traffic now goes through Server B"
+    if [[ -n "$SSH_CLIENT_IP" || -n "$LOCAL_IP" ]]; then
+        echo "  - SSH access is preserved (inbound connections stay on the real link)"
+    fi
+    echo "  - Server B must masquerade/NAT the tunnel traffic (see README: Server B setup)"
+else
+    echo "  - SSH and direct connections to this server are NOT affected"
+    echo "  - All VPN client traffic (${VPN_SUBNET}) goes through Server B"
+fi
 echo ""
