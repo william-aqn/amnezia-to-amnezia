@@ -595,15 +595,23 @@ elif EXISTING="$(detect_existing_server)"; then
                 echo "    $((_i+1))) $(basename "${EXISTING_CLIENTS[$_i]}")"
             done
             echo "    n) Create new client"
+            echo "    s) Skip -- just (re)generate the tunnel, leave clients alone"
             echo ""
-            echo -n "Show existing or create new? [1]: "
-            read -r CLIENT_CHOICE
-            CLIENT_CHOICE="${CLIENT_CHOICE:-1}"
+            if [[ -t 0 ]]; then
+                echo -n "Show existing, create new, or skip? [s]: "
+                read -r CLIENT_CHOICE
+                CLIENT_CHOICE="${CLIENT_CHOICE:-s}"
+            else
+                CLIENT_CHOICE="s"
+                info "Non-interactive run -- skipping client management"
+            fi
         else
             CLIENT_CHOICE="n"
         fi
 
-        if [[ "$CLIENT_CHOICE" == "n" || "$CLIENT_CHOICE" == "N" ]]; then
+        if [[ "$CLIENT_CHOICE" == "s" || "$CLIENT_CHOICE" == "S" ]]; then
+            log "Skipping client management -- only the tunnel will be (re)generated"
+        elif [[ "$CLIENT_CHOICE" == "n" || "$CLIENT_CHOICE" == "N" ]]; then
             # --- Create new client ---
             # Find next client number
             NEXT_NUM=1

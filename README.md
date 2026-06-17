@@ -160,12 +160,15 @@ The script is safe to re-run. On repeat runs it detects the existing setup:
     1) client1.conf
     2) client2.conf
     n) Create new client
+    s) Skip -- just (re)generate the tunnel, leave clients alone
 
-Show existing or create new? [1]:
+Show existing, create new, or skip? [s]:
 ```
 
   - Pick a number to display that client's config (for import into the Amnezia app)
   - Enter `n` to generate a new client (new keys, new IP, peer added to server, service restarted)
+  - Press Enter (or `s`) to **skip** client management and go straight to (re)generating the tunnel — this is the default, so updating the tunnel never forces you through the client menu
+  - When run non-interactively (no TTY, e.g. from automation) the menu is skipped automatically
 - **Tunnel config** is always regenerated from the provided config file. If the new config differs from the running one (e.g. Server B's keys, endpoint or AWG params changed), the tunnel is **restarted automatically** so the change takes effect; if it's identical, the tunnel is left running untouched.
 - Use `--force` to rebuild amneziawg binaries from latest source
 
