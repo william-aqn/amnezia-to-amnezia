@@ -557,7 +557,11 @@ detect_existing_server() {
 }
 
 if [[ "$NO_SERVER" == true ]]; then
-    log "VPN server setup skipped (--no-server)"
+    if [[ "$CLIENT_ONLY" == true ]]; then
+        log "Client-only mode: this box will route its own traffic through Server B"
+    else
+        log "VPN server setup skipped (--no-server)"
+    fi
 elif EXISTING="$(detect_existing_server)"; then
     EXISTING_TYPE="${EXISTING%%:*}"
     EXISTING_REST="${EXISTING#*:}"
@@ -853,16 +857,18 @@ if [[ "$CLIENT_ONLY" == true ]]; then
     # keep inbound connections (SSH) on the real link so we don't lock ourselves
     # out: reply traffic from our public IP -- and to the admin's IP -- stays on
     # the main routing table instead of being pushed into the tunnel.
+    # Added in PreUp (before awg-quick installs the full-tunnel routing) so
+    # there's no window where an SSH reply could be pushed into the tunnel.
     {
         echo ""
         echo "# Keep inbound connections (SSH, etc.) reachable -- do not lock ourselves out"
     } >> "$AWG_CONF"
     if [[ -n "$SSH_CLIENT_IP" ]]; then
-        echo "PostUp = ip rule add to ${SSH_CLIENT_IP} table main priority 90" >> "$AWG_CONF"
+        echo "PreUp = ip rule add to ${SSH_CLIENT_IP} table main priority 90 2>/dev/null || true" >> "$AWG_CONF"
         echo "PostDown = ip rule del to ${SSH_CLIENT_IP} table main priority 90 2>/dev/null || true" >> "$AWG_CONF"
     fi
     if [[ -n "$LOCAL_IP" ]]; then
-        echo "PostUp = ip rule add from ${LOCAL_IP} table main priority 100" >> "$AWG_CONF"
+        echo "PreUp = ip rule add from ${LOCAL_IP} table main priority 100 2>/dev/null || true" >> "$AWG_CONF"
         echo "PostDown = ip rule del from ${LOCAL_IP} table main priority 100 2>/dev/null || true" >> "$AWG_CONF"
     fi
 

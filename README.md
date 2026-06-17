@@ -2,6 +2,8 @@
 
 One-script setup: installs an AmneziaWG VPN server on Server A, builds a tunnel to Server B, and routes all VPN client traffic through Server B. SSH and direct access to Server A stay unaffected.
 
+Or, with [`--client-only`](#client-only-mode-route-this-box-through-awg-no-chain), skip the server and the chain entirely — route **this machine itself** through Server B as a plain full-tunnel AWG client.
+
 ```
                          AmneziaWG tunnel
   Clients --> [ Server A (Amnezia VPN) ] ===========> [ Server B (Amnezia VPN) ] --> Internet
@@ -45,6 +47,39 @@ The script will:
 - Start both services and enable them on boot
 - Print a ready-to-use client config for the Amnezia app
 
+## Client-only mode (route this box through AWG, no chain)
+
+If you don't need Server A to be a VPN server for other clients and just want
+**this Linux machine itself** to reach the internet through Server B, use
+`--client-only`:
+
+```bash
+sudo bash awg-install.sh client.conf --client-only
+```
+
+```
+  [ This Linux box ] ==== AmneziaWG full tunnel ====> [ Server B ] --> Internet
+         |
+         +-- SSH / inbound connections stay on the real link (preserved)
+```
+
+In this mode the script:
+- **Skips** the VPN server entirely (no `wg0`, no clients, no `ip_forward`)
+- Builds only the AWG client tunnel (`awg0`) as a **full tunnel** (`AllowedIPs = 0.0.0.0/0`)
+- Lets `awg-quick` manage routing, so **all** of the box's outbound traffic goes through Server B
+- Routes DNS through the tunnel too (from the config's `DNS =`), to avoid leaks
+- **Preserves your SSH session**: reply traffic from the box's public IP — and to the IP you're connected from — stays on the main routing table, so you won't lock yourself out
+
+Verify after install (should print Server B's IP):
+
+```bash
+curl -4 ifconfig.me
+```
+
+> Server B still needs NAT/masquerade for the tunnel traffic — see
+> [Server B setup](#server-b-setup). If Server B was set up via the Amnezia app
+> this is usually already done.
+
 ## Requirements
 
 **Server A** (where the script runs):
@@ -63,16 +98,22 @@ sudo ./install.sh [config-file] [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--client-only` | | This box becomes a plain AWG client: no VPN server, no chain — **all of its own traffic** goes through the tunnel to Server B (full tunnel). SSH access is preserved automatically. |
 | `--vpn-subnet CIDR` | `10.8.1.0/24` | VPN client subnet |
 | `--server-port PORT` | random | VPN server listen port |
 | `--interface NAME` | `awg0` | Tunnel interface name |
 | `--verbose` | | Enable runtime logging to /var/log/amneziawg/ |
-| `--no-server` | | Skip VPN server setup (tunnel only) |
+| `--no-server` | | Skip VPN server setup (tunnel only, source-based routing) |
 | `--force` | | Force rebuild of amneziawg binaries |
 | `--status` | | Show diagnostic info and exit |
 | `--uninstall` | | Remove everything and exit |
 
 If `config-file` is omitted, you will be prompted to paste it.
+
+> **`--client-only` vs `--no-server`** — `--no-server` still sets up the chain
+> (source-based routing): only a VPN *client subnet* goes through the tunnel,
+> useful when this box already runs a separate VPN server. `--client-only`
+> routes **this machine itself** through Server B and sets up no server at all.
 
 ## What the script does
 
