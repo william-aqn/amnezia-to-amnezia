@@ -166,8 +166,14 @@ Show existing or create new? [1]:
 
   - Pick a number to display that client's config (for import into the Amnezia app)
   - Enter `n` to generate a new client (new keys, new IP, peer added to server, service restarted)
-- **Tunnel config** is always regenerated from the provided config file
+- **Tunnel config** is always regenerated from the provided config file. If the new config differs from the running one (e.g. Server B's keys, endpoint or AWG params changed), the tunnel is **restarted automatically** so the change takes effect; if it's identical, the tunnel is left running untouched.
 - Use `--force` to rebuild amneziawg binaries from latest source
+
+So to apply a new `client.conf`, just re-run the script with it — no manual restart needed:
+
+```bash
+sudo bash awg-install.sh new-client.conf --client-only   # or without --client-only for the chain
+```
 
 ## Tunnel management
 

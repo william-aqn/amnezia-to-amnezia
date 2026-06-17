@@ -813,6 +813,11 @@ fi
 
 AWG_CONF="$AWG_CONF_DIR/${AWG_INTERFACE}.conf"
 
+# Remember the current config so we can tell whether it actually changed
+# (e.g. a new client.conf was provided) and restart the tunnel only if so.
+AWG_CONF_OLD_HASH=""
+[[ -f "$AWG_CONF" ]] && AWG_CONF_OLD_HASH="$(sha256sum "$AWG_CONF" 2>/dev/null | awk '{print $1}')"
+
 log "Generating tunnel config: $AWG_CONF"
 
 # [Interface] header.
@@ -947,6 +952,13 @@ fi
 
 chmod 600 "$AWG_CONF"
 
+# Did the tunnel config actually change vs the previous run?
+AWG_CONF_NEW_HASH="$(sha256sum "$AWG_CONF" 2>/dev/null | awk '{print $1}')"
+AWG_CONF_CHANGED=true
+if [[ -n "$AWG_CONF_OLD_HASH" && "$AWG_CONF_OLD_HASH" == "$AWG_CONF_NEW_HASH" ]]; then
+    AWG_CONF_CHANGED=false
+fi
+
 # --- Create logging wrapper for amneziawg-go ---
 
 AWG_LOG_DIR="/var/log/amneziawg"
@@ -1028,10 +1040,23 @@ if [[ "$SERVER_CREATED" == true ]]; then
     }
 fi
 
-log "Starting tunnel (${AWG_INTERFACE})..."
-systemctl enable --now awg-quick@${AWG_INTERFACE} 2>/dev/null || {
-    warn "Failed to start tunnel, try manually: systemctl start awg-quick@${AWG_INTERFACE}"
-}
+if systemctl is-active "awg-quick@${AWG_INTERFACE}" &>/dev/null; then
+    # Already running -- apply the freshly generated config only if it changed
+    systemctl enable "awg-quick@${AWG_INTERFACE}" &>/dev/null || true
+    if [[ "$AWG_CONF_CHANGED" == true ]]; then
+        log "Tunnel config changed -- restarting (${AWG_INTERFACE})..."
+        systemctl restart "awg-quick@${AWG_INTERFACE}" 2>/dev/null || {
+            warn "Failed to restart tunnel, try manually: systemctl restart awg-quick@${AWG_INTERFACE}"
+        }
+    else
+        log "Tunnel config unchanged -- ${AWG_INTERFACE} already up, not restarting"
+    fi
+else
+    log "Starting tunnel (${AWG_INTERFACE})..."
+    systemctl enable --now "awg-quick@${AWG_INTERFACE}" 2>/dev/null || {
+        warn "Failed to start tunnel, try manually: systemctl start awg-quick@${AWG_INTERFACE}"
+    }
+fi
 
 # --- Show results ---
 
