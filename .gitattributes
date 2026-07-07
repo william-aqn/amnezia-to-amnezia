@@ -1,0 +1,4 @@
+# Shell scripts MUST use LF endings — they run on Linux and CRLF breaks the
+# shebang/parsing (falls back to /bin/sh, "set: pipefail: invalid option name").
+*.sh text eol=lf
+install.sh text eol=lf

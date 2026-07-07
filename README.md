@@ -4,6 +4,8 @@ One-script setup: installs an AmneziaWG VPN server on Server A, builds a tunnel 
 
 Or, with [`--client-only`](#client-only-mode-route-this-box-through-awg-no-chain), skip the server and the chain entirely — route **this machine itself** through Server B as a plain full-tunnel AWG client.
 
+Optionally, [`--mimic`](#stealth-mode-disguise-the-whole-tunnel) is **full stealth**: it renames the process, interfaces, config dir, systemd unit, binaries and logs after a legit service (e.g. `nginx`), so `awg`/`wg`/`amnezia` appear nowhere — without conflicting with a real one.
+
 ```
                          AmneziaWG tunnel
   Clients --> [ Server A (Amnezia VPN) ] ===========> [ Server B (Amnezia VPN) ] --> Internet
@@ -105,6 +107,8 @@ sudo ./install.sh [config-file] [options]
 | `--verbose` | | Enable runtime logging to /var/log/amneziawg/ |
 | `--no-server` | | Skip VPN server setup (tunnel only, source-based routing) |
 | `--force` | | Force rebuild of amneziawg binaries |
+| `--mimic [PROFILE]` | `nginx` | **Full stealth** — rename process, interfaces, config dir, unit, binaries, logs & routing table after PROFILE so nothing reads awg/wg/amnezia (see [Stealth mode](#stealth-mode-disguise-the-whole-tunnel)). Profiles: `nginx`, `apache2`, `mysqld`, `containerd`, `systemd-timesyncd` |
+| `--unmimic` | | Remove the disguise; restore standard names (needs your config) |
 | `--status` | | Show diagnostic info and exit |
 | `--uninstall` | | Remove everything and exit |
 
@@ -147,6 +151,81 @@ If `config-file` is omitted, you will be prompted to paste it.
 ```
 
 SSH and direct connections use the main routing table -- unaffected.
+
+## Stealth mode (disguise the whole tunnel)
+
+On a censored network the *host* can be inspected too, not just the wire — and
+by default the setup is easy to fingerprint: interface names `awg0`/`wg0`, the
+`amneziawg-go`/`awg`/`awg-quick` binaries, the `awg-quick@` unit, `/etc/amnezia`,
+etc. **Stealth mode renames every one of these** after a chosen profile, so
+`awg`, `wg` and `amnezia` appear **nowhere** on the running system:
+
+```bash
+sudo bash awg-install.sh client.conf --mimic            # full stealth as nginx (default)
+sudo bash awg-install.sh client.conf --mimic apache2    # ... or another profile
+sudo bash awg-install.sh client.conf --unmimic          # revert to standard names
+```
+
+With `--mimic nginx` the box looks like an nginx install everywhere you'd look:
+
+```
+$ ps aux | grep nginx
+root  1234  ...  nginx: worker process web0
+$ ss -ulpn
+UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*  users:(("nginx",pid=1234,fd=7))
+$ ip link           # -> web0 (tunnel), web1 (server); no awg0/wg0
+$ systemctl status nginx-cache@web0
+$ ls /etc/nginx-cache/     # configs live here, not /etc/amnezia
+```
+
+What each profile renames (`nginx` shown):
+
+| Thing | Standard | Stealth (`nginx`) |
+|-------|----------|-------------------|
+| Process (`comm` / `argv[0]`) | `amneziawg-go` | `nginx` / `nginx: worker process` |
+| Tunnel / server interface | `awg0` / `wg0` | `web0` / `web1` |
+| Config dir | `/etc/amnezia/amneziawg` | `/etc/nginx-cache` |
+| systemd unit | `awg-quick@` | `nginx-cache@` |
+| Engine binary | `/usr/local/bin/amneziawg-go` | `/usr/local/lib/nginx/nginx` |
+| Control tool | `/usr/local/bin/awg` | `/usr/local/lib/nginx/nginx-cfg` |
+| Bring-up script | `/usr/local/bin/awg-quick` | `/usr/local/lib/nginx/nginx-svc` |
+| Logs | `/var/log/amneziawg` | `/var/log/nginx-cache` |
+| Routing table | `via_tunnel` | `webrt` |
+
+Profiles: `nginx` (default), `apache2`, `mysqld`, `containerd`,
+`systemd-timesyncd`.
+
+**How it works.** The engine is a *copy* of `amneziawg-go` named after the
+profile, launched with a realistic `argv[0]` — it re-execs itself via
+`/proc/self/exe` on daemonize, so `comm` follows the on-disk name. The bring-up
+script gets a one-line shell function injected so its hardcoded `awg` calls route
+to the renamed control tool (no file named `awg` need exist). Configs are passed
+to it by full path, so the config dir can live anywhere.
+
+**No conflict with a real service.** Everything lives under private paths that
+are **never added to `$PATH`**; no ports (80/443…) are bound, `/etc/nginx` is
+never touched, and no unit under the service's real name is installed. A real
+`nginx`, if present, is untouched — the disguise just blends in.
+
+**Switching / reverting preserves keys.** Toggling stealth on/off (or changing
+profile) regenerates the tunnel under the new names and removes the old ones in
+one run; existing server/client keys are moved across, so clients keep working.
+Because this regenerates the tunnel, `--mimic`/`--unmimic` need your config (and
+the same mode flags you first used) — re-run e.g. `... client.conf --unmimic`.
+
+**Auto-offer on upgrade.** Run this script on a box that an earlier version set
+up, and it detects the install and offers stealth right away. Decline once and
+it won't ask again; once enabled, the disguise is kept across re-runs.
+
+Inspect the active scheme any time with `sudo ./install.sh --status`.
+
+> **Limitations.** (1) The tunnel interface still appears as the daemon's last
+> argument (`nginx: worker process web0`) — visible only in the full command
+> line, not in the process name or `ss`. (2) `strings` on the engine binary still
+> reveals its upstream Go module path; defeating deep binary forensics would need
+> recompiling from patched sources and is out of scope. Stealth targets casual
+> inspection and automated scanners (process lists, `ip`, `ls`, `systemctl`,
+> grep for `amnezia`), not a forensic teardown by root.
 
 ## Re-running the script / adding clients
 
@@ -246,6 +325,18 @@ sudo ./install.sh client.conf
 - Check endpoint: `ping <server-B-ip>`
 - Check port: `nc -zuv <ip> <port>`
 - Check config: `cat /etc/amnezia/amneziawg/awg0.conf`
+
+> **"Chain mode requires the endpoint as an IP address"** — in chain mode the
+> script pins a host route to Server B via your real gateway (`Table = off`), so
+> the endpoint must resolve to an IP at install time. Put the IP in the config's
+> `Endpoint =`, fix DNS, or use `--client-only` (there awg-quick resolves the
+> endpoint itself). This replaces the old behaviour where a bad endpoint left the
+> tunnel silently dead.
+
+**"Installation finished WITH ERRORS -- the tunnel is not up"**
+- The engine started but the interface never appeared. Check
+  `journalctl -u awg-quick@awg0 -n50` (or the stealth unit name shown by
+  `--status`) and re-run `sudo ./install.sh --status`.
 
 **Clients can't connect to Server A**
 - Check server: `awg show wg0`
